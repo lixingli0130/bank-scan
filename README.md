@@ -1,8 +1,10 @@
 # 银行股每日扫描（大佬刘双估值战法）
 
-基于「大佬刘战法一」的银行股买入点扫描脚本，每日自动提示哪些银行进入上车区间。扫描结果自动生成可视化面板，通过 GitHub Pages 在线浏览。
+基于「大佬刘战法一」的银行股买入点扫描脚本，每日自动提示哪些银行进入上车区间。扫描结果由 `gpt-5.6-sol` 生成每日解读，并自动发布到 GitHub Pages 可视化面板。
 
-📊 在线面板：https://hyan1985.github.io/bank-scan/
+📊 在线面板：https://lixingli0130.github.io/bank-scan/
+
+> 本仓库 fork 自 [hyan1985/bank-scan](https://github.com/hyan1985/bank-scan)，部署与 AI 后端由 `lixingli0130` 维护。
 
 ## 估值逻辑
 
@@ -44,14 +46,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# 编辑 .env 填入 TUSHARE_TOKEN（必填）和 DEEPSEEK_API_KEY（可选）
+# 编辑 .env 填入 TUSHARE_TOKEN 和 OPENAI_API_KEY
 
 python bank_daily_scan.py
 ```
 
 可选参数：
 ```bash
-python bank_daily_scan.py --no-ai      # 跳过 DeepSeek 解读
+python bank_daily_scan.py --no-ai      # 跳过 OpenAI 解读
 python bank_daily_scan.py --no-save    # 不保存文件
 python bank_daily_scan.py --workers 4  # 并行拉取线程数
 ```
@@ -60,17 +62,13 @@ python bank_daily_scan.py --workers 4  # 并行拉取线程数
 
 - `output/bank_scan_YYYYMMDD.csv` — 全量明细
 - `output/bank_scan_YYYYMMDD.xlsx` — 上车提示 Excel（含全量/上车提示/估值参数 3 个 sheet）
-- `output/ai_interpret_YYYYMMDD.md` — DeepSeek 每日解读（配置 key 时）
+- `output/openai_interpret_YYYYMMDD.md` — OpenAI 每日解读
 
 ### AI 每日解读
 
-默认使用 `deepseek-v4-flash`（可用 `DEEPSEEK_MODEL` 覆盖）。该模型为推理模型，**默认开启 thinking mode**，会先把大量 token 消耗在思考过程上，导致 `max_tokens` 被耗尽、最终回答 `content` 为空（现象：面板文字停留在旧日期，日志显示 `HTTP 200` 但 `content=""`）。
+默认通过 OpenAI Responses API 使用 `gpt-5.6-sol`，推理强度为 `medium`。可分别通过 `OPENAI_MODEL` 与 `OPENAI_REASONING_EFFORT` 覆盖；GitHub Actions 部署固定使用 `gpt-5.6-sol`，防止运行环境意外换模。
 
-脚本已做如下处理：
-
-- 请求体显式传入 `"thinking": {"type": "disabled"}` 关闭推理模式，让模型直接把回答写入 `content`；
-- `max_tokens` 设为 2000；
-- 解析时兜底：若 `content` 为空，回退读取 `reasoning_content`。
+如果 OpenAI 请求失败，脚本会让本次 Action 明确失败，不会把旧日期的 AI 文本伪装成最新分析。
 
 ## 定时自动跑（GitHub Actions）
 
@@ -85,23 +83,12 @@ python bank_daily_scan.py --workers 4  # 并行拉取线程数
 
 ### 部署步骤
 
-1. **在 GitHub 创建仓库**（如 `bank-scan`），`git init` 后把代码推上去：
+仓库、工作流和 Pages 已部署到 `lixingli0130/bank-scan`。首次运行前只需配置 GitHub Secrets（仓库 → Settings → Secrets and variables → Actions → New repository secret）：
 
-   ```bash
-   cd /Users/hyan/Desktop/银行股
-   git init
-   git add .
-   git commit -m "银行股每日扫描"
-   git branch -M main
-   git remote add origin git@github.com:你的用户名/bank-scan.git
-   git push -u origin main
-   ```
+   - `TUSHARE_TOKEN`：你的 Tushare token（必填）
+   - `OPENAI_API_KEY`：你的 OpenAI API key（必填，需有 `gpt-5.6-sol` 访问权限）
 
-2. **配置 GitHub Secrets**（仓库 → Settings → Secrets and variables → Actions → New repository secret）：
-   - `TUSHARE_TOKEN`：你的 tushare token（必填）
-   - `DEEPSEEK`：DeepSeek key（可选，填了自动生成 AI 解读）
-
-3. Actions 会自动按计划跑。也可在 Actions 页面手动触发（Run workflow）。
+配置后可在 Actions 页面手动触发一次 **Run workflow**；之后工作日会按计划自动运行。
 
 ### 可视化面板（GitHub Pages）
 
@@ -112,7 +99,7 @@ python bank_daily_scan.py --workers 4  # 并行拉取线程数
 
 ### 注意
 
-- `.env` 已被 `.gitignore` 排除，**不要提交真实 token**。
+- `.env` 已被 `.gitignore` 排除，**不要提交真实 token**。GitHub Actions 只从加密 Secrets 读取密钥。
 - 扫描结果自动 commit 回仓库，需给 workflow 开启 `contents: write` 权限（已在 yml 中声明）。
 - 如仓库为私有，扫描结果仅自己可见；如公开，注意结果中的投资信息会公开。
 

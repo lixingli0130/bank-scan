@@ -17,7 +17,7 @@
 输出：
   output/bank_scan_YYYYMMDD.csv   全量明细
   output/bank_scan_YYYYMMDD.xlsx  上车提示表（含多 sheet）
-  output/ai_interpret_YYYYMMDD.md DeepSeek 解读（配置了 DEEPSEEK_API_KEY 时）
+  output/openai_interpret_YYYYMMDD.md OpenAI 解读（配置了 OPENAI_API_KEY 时）
 
 依赖：tushare / pandas / numpy / requests / openpyxl / python-dotenv
 """
@@ -389,18 +389,38 @@ def evaluate_stock(row: pd.Series, data: dict, close: float | None) -> dict:
     return out
 
 
-# ---------------------------------------------------------------- DeepSeek 解读
+# ---------------------------------------------------------------- OpenAI 解读
 
-def deepseek_interpret(df: pd.DataFrame, trade_date: str) -> str | None:
-    """调用 DeepSeek 生成当日上车解读；未配置 key 时返回 None。"""
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+def _response_output_text(data: dict) -> str:
+    """从 Responses API 原始 JSON 中提取所有 output_text。"""
+    direct = data.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    parts: list[str] = []
+    for item in data.get("output", []):
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict) or content.get("type") != "output_text":
+                continue
+            text = content.get("text", "")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+def openai_interpret(df: pd.DataFrame, trade_date: str) -> str | None:
+    """调用 OpenAI Responses API 生成当日上车解读。"""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
 
     import requests
 
-    base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+    reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "medium")
 
     # 组装输入表：只挑关键列
     show_cols = [
@@ -424,36 +444,28 @@ def deepseek_interpret(df: pd.DataFrame, trade_date: str) -> str | None:
 
     try:
         resp = requests.post(
-            f"{base_url}/chat/completions",
+            f"{base_url}/responses",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
                 "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "你是一位严谨的A股银行股价值投资分析助手。",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.6,
-                "max_tokens": 2000,
-                "thinking": {"type": "disabled"},
+                "instructions": "你是一位严谨的A股银行股价值投资分析助手。",
+                "input": prompt,
+                "reasoning": {"effort": reasoning_effort},
+                "max_output_tokens": 8000,
             },
-            timeout=60,
+            timeout=180,
         )
         resp.raise_for_status()
-        data = resp.json()
-        msg = data["choices"][0]["message"]
-        content = (msg.get("content") or "").strip()
+        content = _response_output_text(resp.json())
         if not content:
-            content = (msg.get("reasoning_content") or "").strip()
-        return content if content else None
+            raise ValueError("Responses API 未返回 output_text")
+        return content
     except Exception as exc:  # noqa: BLE001
-        print(f"[DeepSeek] 解读失败：{exc}", file=sys.stderr)
-        return None
+        print(f"[OpenAI] 解读失败：{exc}", file=sys.stderr)
+        raise RuntimeError("OpenAI 每日解读生成失败") from exc
 
 
 # ---------------------------------------------------------------- 主流程
@@ -545,16 +557,16 @@ def run(
         print(f"[5/5] 明细已保存：{OUTPUT_DIR / f'bank_scan_{trade_date}.csv'}")
 
     if with_ai:
-        md = deepseek_interpret(result, trade_date)
+        md = openai_interpret(result, trade_date)
         if md:
-            out_md = OUTPUT_DIR / f"ai_interpret_{trade_date}.md"
+            out_md = OUTPUT_DIR / f"openai_interpret_{trade_date}.md"
             out_md.write_text(
                 f"# 银行股每日上车提示 · {trade_date}\n\n" + md + "\n",
                 encoding="utf-8",
             )
             print(f"      AI 解读已保存：{out_md}")
         else:
-            print("      未配置 DEEPSEEK_API_KEY，跳过 AI 解读")
+            print("      未配置 OPENAI_API_KEY 或 OpenAI 调用失败，跳过 AI 解读")
 
     return result
 
@@ -661,19 +673,32 @@ def update_dashboard(df: pd.DataFrame) -> Path:
                     float(r[c]) if isinstance(r[c], (int, float, np.floating)) else r[c]
                 )
         rows.append(item)
-    data_json = json.dumps(rows, ensure_ascii=False)
+    def json_for_inline_script(value) -> str:
+        """序列化为 script 内安全的 JSON，避免 </script> 提前闭合标签。"""
+        return (
+            json.dumps(value, ensure_ascii=False)
+            .replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
 
-    # AI 解读：读取最近的 ai_interpret_*.md
+    data_json = json_for_inline_script(rows)
+
+    # AI 解读：只读取本部署生成的新文件，避免把上游旧文本误标为 OpenAI。
     ai_text = ""
-    md_files = sorted(OUTPUT_DIR.glob("ai_interpret_*.md"), reverse=True)
+    md_files = sorted(OUTPUT_DIR.glob("openai_interpret_*.md"), reverse=True)
     if md_files:
         ai_text = md_files[0].read_text(encoding="utf-8").strip()
 
     html = template.read_text(encoding="utf-8")
     html = html.replace("__DATA_PLACEHOLDER__", data_json)
     # 注入 AI 文本（转义为 JS 字符串）
-    ai_js = json.dumps(ai_text, ensure_ascii=False)
+    ai_js = json_for_inline_script(ai_text)
     html = html.replace("__AI_PLACEHOLDER__", ai_js)
+    model_js = json_for_inline_script(os.getenv("OPENAI_MODEL", "gpt-5.6-sol"))
+    html = html.replace("__AI_MODEL_PLACEHOLDER__", model_js)
     out = BASE_DIR / "index.html"
     out.write_text(html, encoding="utf-8")
     print(f"  Dashboard 已更新：{out}")
@@ -683,7 +708,7 @@ def update_dashboard(df: pd.DataFrame) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="银行股每日双估值上车扫描")
     parser.add_argument("--no-save", action="store_true", help="不保存文件")
-    parser.add_argument("--no-ai", action="store_true", help="跳过 DeepSeek 解读")
+    parser.add_argument("--no-ai", action="store_true", help="跳过 OpenAI 解读")
     parser.add_argument(
         "--workers", type=int, default=8, help="并行拉取线程数（默认8）"
     )

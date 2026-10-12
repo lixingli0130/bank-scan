@@ -34,18 +34,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 写入密钥
+      - name: 检查密钥
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo "TUSHARE_TOKEN=${{ secrets.TUSHARE_TOKEN }}" > .env
-          if [ -n "${{ secrets.DEEPSEEK }}" ]; then
-            echo "DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK }}" >> .env
+          if [ -z "$TUSHARE_TOKEN" ]; then
+            echo "::error::缺少 Actions Secret: TUSHARE_TOKEN"
+            exit 1
+          fi
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::缺少 Actions Secret: OPENAI_API_KEY"
+            exit 1
           fi
 
       - name: 运行每日扫描
         run: python bank_daily_scan.py
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-5.6-sol
+          OPENAI_REASONING_EFFORT: medium
 
       - name: 提交扫描结果并更新面板
         run: |
